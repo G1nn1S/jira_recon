@@ -1,6 +1,3 @@
-requests
-asyncio
-json
-os
-re
-sys
+requests>=2.20.0
+aiohttp>=3.8.0
+aiofiles>=0.8.0
