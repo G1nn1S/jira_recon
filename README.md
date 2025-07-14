@@ -28,3 +28,15 @@
     ```
 
 4. Enter the target JIRA domain (e.g., `example` for `https://example.atlassian.net`) and choose what to scrape (filters, dashboards, or both).
+
+## ⚠️ Disclaimer
+
+This tool is developed **strictly for educational, ethical hacking, and authorized security testing purposes**. You **must** obtain proper permission before using it on any JIRA instance that you do not own or have explicit authorization to assess.
+
+**Unauthorized use of this tool against systems you do not own is illegal and unethical. The authors take no responsibility for any misuse or damage caused by this tool.**
+
+Use responsibly — always hack with permission. 🛡️
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
