@@ -45,7 +45,7 @@ async def filters(company):
     
     """ Retrieve different filters and then retrieve any available surnames """
 
-    url = f"https://{company}.atlassian.net/rest/api/2/filter/search?expand=jql&maxResults=1000"
+    url = f"https://{company}.atlassian.net/rest/api/2/filter/search"
 
     response = requests.get(url)
     if response.status_code != 200:
@@ -54,9 +54,12 @@ async def filters(company):
 
     data = response.json()
 
-    os.makedirs("filters/filter_names", exist_ok=True)
-    os.makedirs("filters/usernames", exist_ok=True)
-    with open(f"filters/{company}.json", "w") as f:
+    os.makedirs(f"{company}_filters/", exist_ok=True)
+    os.makedirs(f"{company}_filters/filter_names", exist_ok=True)
+    
+    os.makedirs(f"{company}_filters/usernames", exist_ok=True)
+
+    with open(f"{company}_filters/{company}.json", "w") as f:
         json.dump(data, f, indent=4)
     print(f"\nFilters JSON saved to filters/{company}.json")
 
@@ -89,41 +92,46 @@ async def filters(company):
                         sanitized_name = re.sub(r'[^a-z0-9]+', '_', json_data["name"].lower()).strip('_')
                         filename = f"{sanitized_name}.json"
 
-                    with open(f"filters/filter_names/{filename}", "w") as f:
+                    with open(f"{company}_filters/filter_names/{filename}", "w") as f:
                         json.dump(json_data, f, indent=4)
 
-                    print(f"Saved filters/filter_names/{filename}")
-
+                    print(f"[✓] Saved: filters/filter_names/{GREEN}{filename}{RESET}")
                 else:
                     print(f"Failed to fetch {link} (Status {res.status_code})")
             except Exception as e:
                 print(f"Error fetching {link}: {e}")
-        else:
-            print(f"⏭️ Skipped link (no numeric ID): {link}")
+        # else:
+            # print(f"⏭️ Skipped link (no numeric ID): {link}")
 
-        os.makedirs("filters/usernames", exist_ok=True)
+        os.makedirs(f"{company}_filters/usernames", exist_ok=True)
         all_users = []
-        for file in os.listdir("filters/filter_names"):
+        seen_ids = set()
+        seen_names = set()
+
+        for file in os.listdir(f"{company}_filters/filter_names"):
             if file.endswith(".json"):
                 try:
-                    with open(f"filters/filter_names/{file}", "r") as f:
+                    with open(f"{company}_filters/filter_names/{file}", "r") as f:
                         data = json.load(f)
                         for permission in data.get("editPermissions", []):
                             user = permission.get("user", {})
                             displayName = user.get("displayName")
                             active = user.get("active")
                             accountId = user.get("accountId")
+
                             if displayName and accountId:
-                                all_users.append({
-                                    "displayName": displayName,
-                                    "active": active,
-                                    "accountId": accountId
-                                })
+                                if accountId not in seen_ids and displayName not in seen_names:
+                                    all_users.append({
+                                        "displayName": displayName,
+                                        "active": active,
+                                        "accountId": accountId
+                                    })
+                                    seen_ids.add(accountId)
+                                    seen_names.add(displayName)
                 except Exception as e:
                     print(f"Error processing {file}: {e}")
-        with open("filters/usernames/filter_usernames.json", "w") as f:
+        with open(f"{company}_filters/usernames/filter_usernames.json", "w") as f:
             json.dump(all_users, f, indent=4)
-        print(f"\nCollected user info saved to filters/usernames/filter_usernames.json")
 
 async def dashboard(company):
     
@@ -138,8 +146,8 @@ async def dashboard(company):
 
     data = response.json()
 
-    os.makedirs("dashboard", exist_ok=True)
-    with open(f"dashboard/{company}.json", "w") as f:
+    os.makedirs(f"{company}_dashboard", exist_ok=True)
+    with open(f"{company}_dashboard/{company}.json", "w") as f:
         json.dump(data, f, indent=4)
     print(f"\nRaw dashboard JSON saved to dashboard/{company}.json")
 
@@ -161,11 +169,26 @@ async def dashboard(company):
                 users.extend(extract_user_info(item))
         return users
 
-    user_info = extract_user_info(data)
+    user_info_raw = extract_user_info(data)
 
-    with open(f"dashboard/{company}_users.json", "w") as f:
-        json.dump(user_info, f, indent=4)
+    unique_users = []
+    seen_ids = set()
+    seen_names = set()
+
+    for user in user_info_raw:
+        accountId = user.get("accountId")
+        displayName = user.get("displayName")
+
+        if accountId and displayName:
+            if accountId not in seen_ids and displayName not in seen_names:
+                unique_users.append(user)
+                seen_ids.add(accountId)
+                seen_names.add(displayName)
+
+    with open(f"{company}_dashboard/{company}_users.json", "w") as f:
+        json.dump(unique_users, f, indent=4)
     print(f"Extracted user info saved to dashboard/{company}_users.json")
+
 
     def find_self_links(obj):
         self_links = []
@@ -182,6 +205,7 @@ async def dashboard(company):
 
     self_urls = find_self_links(data)
 
+    os.makedirs(f"{company}_dashboard/dashboard", exist_ok=True)
     for link in self_urls:
         match = re.search(r"/(\d+)$", link)
         if match:
@@ -189,15 +213,69 @@ async def dashboard(company):
             try:
                 res = requests.get(link)
                 if res.status_code == 200:
-                    with open(f"filters/{id_number}.json", "w") as f:
+                    with open(f"{company}_dashboard/dashboard/{id_number}.json", "w") as f:
                         json.dump(res.json(), f, indent=4)
-                    print(f"Saved filters/{id_number}.json (from dashboard)")
+                    print(f"[✓] Saved: {company}_dashboard/dashboard/{GREEN}{id_number}.json{RESET}")
                 else:
                     print(f"Failed to fetch {link} (Status {res.status_code})")
             except Exception as e:
                 print(f"❌ Error fetching {link}: {e}")
-        else:
-            print(f"⏭️ Skipped link (no numeric ID): {link}")
+        # else:
+        #     print(f"⏭️ Skipped link (no numeric ID): {link}")
+
+
+def print_filters_statistics(company):
+    filters_dir = f"{company}_filters"
+    filter_names_dir = os.path.join(filters_dir, "filter_names")
+    usernames_file = os.path.join(filters_dir, "usernames", "filter_usernames.json")
+
+    filter_count = 0
+    username_count = 0
+
+    if os.path.exists(filter_names_dir):
+        filter_count = len([f for f in os.listdir(filter_names_dir) if f.endswith('.json')])
+    else:
+        print(f"Directory {filter_names_dir} not found.")
+
+    if os.path.exists(usernames_file):
+        try:
+            with open(usernames_file, 'r') as f:
+                usernames_data = json.load(f)
+                username_count = len(usernames_data) 
+        except Exception as e:
+            print(f"Error reading usernames file: {e}")
+    else:
+        print(f"Usernames file {usernames_file} not found.")
+
+    print(f"\n{GREEN}Statistics:{RESET}")
+    print(f"Filters Found: {filter_count}")
+    print(f"Usernames Extracted: {username_count}")
+
+def print_dashboard_statistics(company):
+    dashboard_dir = f"{company}_dashboard/dashboard/"
+    dashboard_users_file = f"{company}_dashboard/{company}_users.json"
+
+    dashboard_count = 0
+    username_count = 0
+
+    if os.path.exists(dashboard_dir):
+        dashboard_count = len([f for f in os.listdir(dashboard_dir) if f.endswith('.json') and f != f"{company}.json"])
+    else:
+        print(f"Directory {dashboard_dir} not found.")
+
+    if os.path.exists(dashboard_users_file):
+        try:
+            with open(dashboard_users_file, 'r') as f:
+                usernames_data = json.load(f)
+                username_count = len(usernames_data)
+        except Exception as e:
+            print(f"Error reading users file: {e}")
+    else:
+        print(f"Dashboard users file {dashboard_users_file} not found.")
+
+    print(f"\n{GREEN}Dashboard Statistics:{RESET}")
+    print(f"Dashboard Files Found: {dashboard_count}")
+    print(f"Usernames Extracted: {username_count}")
 
 
 if __name__ == "__main__":
@@ -229,6 +307,7 @@ if __name__ == "__main__":
             await asyncio.gather(tasks[0])
             done_flag[0] = True
             await spinner_task
+            print_filters_statistics(company_name)
 
         elif choice == "2":
             done_flag = [False]
@@ -238,6 +317,7 @@ if __name__ == "__main__":
             await asyncio.gather(tasks[0])
             done_flag[0] = True
             await spinner_task
+            print_dashboard_statistics(company_name)
 
         elif choice == "3":
             done_flag1 = [False]
@@ -254,5 +334,7 @@ if __name__ == "__main__":
             done_flag2[0] = True
 
             await asyncio.gather(spinner_filters, spinner_dashboard)
+            print_filters_statistics(company_name)
+            print_dashboard_statistics(company_name)
 
     asyncio.run(main())
