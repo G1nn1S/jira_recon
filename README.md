@@ -24,7 +24,7 @@
 
 3. Run the tool:
     ```bash
-    python3 main.py
+    python3 jira_recon.py
     ```
 
 4. Enter the target JIRA domain (e.g., `example` for `https://example.atlassian.net`) and choose what to scrape (filters, dashboards, or both).
