@@ -1,16 +1,18 @@
 import requests
 import asyncio
+import aiohttp
+import aiofiles
 import json
 import os
 import re
 import sys
+import shutil  # for terminal width
 
-# ANSI escape codes for GREEN and reset colors
 GREEN = "\033[92m"
+RED = "\033[91m"
 RESET = "\033[0m"
 CLEAR_SCREEN = "\033[2J\033[H"
 
-# ASCII banner for "JIRA RECON"
 BANNER = f"""
 {GREEN}
        █████ █████ ███████████     █████████      ███████████   ██████████   █████████     ███████    ██████   █████
@@ -27,9 +29,12 @@ BANNER = f"""
 
 SPINNER_FRAMES = ["|", "/", "-", "\\"]
 
+collected_users = []
+seen_account_ids = set()
+seen_display_names = set()
+
 
 async def spinner(task_name, done_flag):
-    
     idx = 0
     while not done_flag[0]:
         sys.stdout.write(
@@ -41,300 +46,213 @@ async def spinner(task_name, done_flag):
     sys.stdout.write(f"\r{GREEN}[✔] {task_name} completed!{' ' * 20}{RESET}\n")
 
 
+async def find_self_links(obj):
+    self_links = []
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if key == "self" and isinstance(value, str):
+                self_links.append(value)
+            else:
+                self_links.extend(await find_self_links(value))
+    elif isinstance(obj, list):
+        for item in obj:
+            self_links.extend(await find_self_links(item))
+    return self_links
+
+
+async def fetch_json(session, url):
+    try:
+        async with session.get(url) as response:
+            if response.status != 200:
+                print(f"❌ Failed to fetch {url}. Status: {response.status}")
+                return None
+            return await response.json()
+    except Exception as e:
+        print(f"⚠️ Exception fetching {url}: {e}")
+        return None
+
+
+async def fetch_and_save_filter(session, url, company):
+    match = re.search(r"/(\d+)$", url)
+    if not match:
+        return None 
+
+    data = await fetch_json(session, url)
+    if not data:
+        return None
+
+    id_number = match.group(1)
+    filename = f"{id_number}.json"
+    if "name" in data:
+        sanitized = re.sub(r'[^a-z0-9]+', '_', data["name"].lower()).strip('_')
+        filename = f"{sanitized}.json"
+
+    path = f"{company}_filters/filter_names/{filename}"
+    async with aiofiles.open(path, "w") as f:
+        await f.write(json.dumps(data, indent=4))
+    print(f"[✓] Saved: filter_names/{filename}")
+
+    collect_users_from_filter(data)
+
+    return data
+
+
+def collect_users_from_filter(data):
+    global collected_users, seen_account_ids, seen_display_names
+    for permission in data.get("editPermissions", []):
+        user = permission.get("user", {})
+        displayName = user.get("displayName")
+        accountId = user.get("accountId")
+        active = user.get("active")
+
+        if displayName and accountId:
+            if accountId not in seen_account_ids and displayName not in seen_display_names:
+                collected_users.append({
+                    "displayName": displayName,
+                    "active": active,
+                    "accountId": accountId
+                })
+                seen_account_ids.add(accountId)
+                seen_display_names.add(displayName)
+
+
 async def filters(company):
-    
-    """ Retrieve different filters and then retrieve any available surnames """
-
-    url = f"https://{company}.atlassian.net/rest/api/2/filter/search"
-
-    response = requests.get(url)
-    if response.status_code != 200:
-        print(f"\nFailed to fetch filters. Status code: {response.status_code}")
-        return
-
-    data = response.json()
-
-    os.makedirs(f"{company}_filters/", exist_ok=True)
     os.makedirs(f"{company}_filters/filter_names", exist_ok=True)
-    
     os.makedirs(f"{company}_filters/usernames", exist_ok=True)
 
-    with open(f"{company}_filters/{company}.json", "w") as f:
-        json.dump(data, f, indent=4)
-    print(f"\nFilters JSON saved to filters/{company}.json")
+    base_url = f"https://{company}.atlassian.net/rest/api/2/filter/search"
 
-    def find_self_links(obj):
-        self_links = []
-        if isinstance(obj, dict):
-            for key, value in obj.items():
-                if key == "self" and isinstance(value, str):
-                    self_links.append(value)
-                else:
-                    self_links.extend(find_self_links(value))
-        elif isinstance(obj, list):
-            for item in obj:
-                self_links.extend(find_self_links(item))
-        return self_links
+    async with aiohttp.ClientSession() as session:
+        root_data = await fetch_json(session, base_url)
+        if not root_data:
+            print("❌ Failed to fetch base filters.")
+            return
 
-    self_urls = find_self_links(data)
+        async with aiofiles.open(f"{company}_filters/{company}.json", "w") as f:
+            await f.write(json.dumps(root_data, indent=4))
 
-    for link in self_urls:
-        match = re.search(r"/(\d+)$", link)
-        if match:
-            id_number = match.group(1)
-            try:
-                res = requests.get(link)
-                if res.status_code == 200:
-                    json_data = res.json()
+        print(f"\n📦 Saved root filter list to {company}_filters/{company}.json")
 
-                    filename = f"{id_number}.json"
-                    if "name" in json_data:
-                        sanitized_name = re.sub(r'[^a-z0-9]+', '_', json_data["name"].lower()).strip('_')
-                        filename = f"{sanitized_name}.json"
+        self_urls = await find_self_links(root_data)
 
-                    with open(f"{company}_filters/filter_names/{filename}", "w") as f:
-                        json.dump(json_data, f, indent=4)
+        tasks = [
+            asyncio.create_task(fetch_and_save_filter(session, url, company))
+            for url in self_urls
+        ]
+        await asyncio.gather(*tasks)
 
-                    print(f"[✓] Saved: filters/filter_names/{GREEN}{filename}{RESET}")
-                else:
-                    print(f"Failed to fetch {link} (Status {res.status_code})")
-            except Exception as e:
-                print(f"Error fetching {link}: {e}")
-        # else:
-            # print(f"⏭️ Skipped link (no numeric ID): {link}")
-
-        os.makedirs(f"{company}_filters/usernames", exist_ok=True)
-        all_users = []
-        seen_ids = set()
-        seen_names = set()
-
-        for file in os.listdir(f"{company}_filters/filter_names"):
-            if file.endswith(".json"):
-                try:
-                    with open(f"{company}_filters/filter_names/{file}", "r") as f:
-                        data = json.load(f)
-                        for permission in data.get("editPermissions", []):
-                            user = permission.get("user", {})
-                            displayName = user.get("displayName")
-                            active = user.get("active")
-                            accountId = user.get("accountId")
-
-                            if displayName and accountId:
-                                if accountId not in seen_ids and displayName not in seen_names:
-                                    all_users.append({
-                                        "displayName": displayName,
-                                        "active": active,
-                                        "accountId": accountId
-                                    })
-                                    seen_ids.add(accountId)
-                                    seen_names.add(displayName)
-                except Exception as e:
-                    print(f"Error processing {file}: {e}")
-        with open(f"{company}_filters/usernames/filter_usernames.json", "w") as f:
-            json.dump(all_users, f, indent=4)
 
 async def dashboard(company):
-    
-    """ Retrieve different dashboars and then retrieve any available surnames"""
-    
-    url = f"https://{company}.atlassian.net/rest/api/3/dashboard"
+    """ Retrieve different dashboards and then retrieve any available usernames """
 
-    response = requests.get(url)
-    if response.status_code != 200:
-        print(f"\nFailed to fetch dashboard. Status code: {response.status_code}")
+    base_url = f"https://{company}.atlassian.net/rest/api/3/dashboard"
+
+    async with aiohttp.ClientSession() as session:
+        data = await fetch_json(session, base_url)
+        if not data:
+            print("❌ Failed to fetch dashboard data.")
+            return
+
+        os.makedirs(f"{company}_dashboard", exist_ok=True)
+        async with aiofiles.open(f"{company}_dashboard/{company}.json", "w") as f:
+            await f.write(json.dumps(data, indent=4))
+        print(f"\nRaw dashboard JSON saved to {company}_dashboard/{company}.json")
+
+        def extract_user_info(obj):
+            users = []
+            if isinstance(obj, dict):
+                if all(k in obj for k in ("displayName", "active", "accountId")):
+                    users.append(
+                        {
+                            "displayName": obj["displayName"],
+                            "active": obj["active"],
+                            "accountId": obj["accountId"],
+                        }
+                    )
+                for value in obj.values():
+                    users.extend(extract_user_info(value))
+            elif isinstance(obj, list):
+                for item in obj:
+                    users.extend(extract_user_info(item))
+            return users
+
+        user_info_raw = extract_user_info(data)
+
+        global collected_users, seen_account_ids, seen_display_names
+
+        for user in user_info_raw:
+            accountId = user.get("accountId")
+            displayName = user.get("displayName")
+
+            if accountId and displayName:
+                if accountId not in seen_account_ids and displayName not in seen_display_names:
+                    collected_users.append(user)
+                    seen_account_ids.add(accountId)
+                    seen_display_names.add(displayName)
+
+        async with aiofiles.open(f"{company}_dashboard/{company}_users.json", "w") as f:
+            await f.write(json.dumps(user_info_raw, indent=4))
+        print(f"\n✅ Saved unique dashboard users to {company}_dashboard/{company}_users.json")
+
+        print(f"\n📊 Dashboard URLs processed: 1")
+        print(f"👤 Unique users extracted (dashboard): {len(user_info_raw)}\n")
+
+
+def pretty_print_users(users):
+    if not users:
+        print("No users found.")
         return
 
-    data = response.json()
+    term_width = shutil.get_terminal_size((80, 20)).columns
+    col1_width = 25 
+    col2_width = 8  
+    col3_width = term_width - col1_width - col2_width - 10
 
-    os.makedirs(f"{company}_dashboard", exist_ok=True)
-    with open(f"{company}_dashboard/{company}.json", "w") as f:
-        json.dump(data, f, indent=4)
-    print(f"\nRaw dashboard JSON saved to dashboard/{company}.json")
+    print(f"\n{GREEN}=== All Unique Usernames Found ==={RESET}\n")
+    header = f"{'Display Name':<{col1_width}}  {'Active':<{col2_width}}  {'Account ID':<{col3_width}}"
+    print(header)
+    print("-" * len(header))
 
-    def extract_user_info(obj):
-        users = []
-        if isinstance(obj, dict):
-            if all(k in obj for k in ("displayName", "active", "accountId")):
-                users.append(
-                    {
-                        "displayName": obj["displayName"],
-                        "active": obj["active"],
-                        "accountId": obj["accountId"],
-                    }
-                )
-            for value in obj.values():
-                users.extend(extract_user_info(value))
-        elif isinstance(obj, list):
-            for item in obj:
-                users.extend(extract_user_info(item))
-        return users
+    for user in users:
+        name = user['displayName'][:col1_width-1]
+        active = user['active']
+        active_str = f"{GREEN}Yes{RESET}" if active else f"{RED}No{RESET}"
+        account_id = user['accountId']
+        if len(account_id) > col3_width:
+            account_id = account_id[:col3_width-3] + "..."
+        print(f"{name:<{col1_width}}  {active_str:<{col2_width}}  {account_id:<{col3_width}}")
 
-    user_info_raw = extract_user_info(data)
-
-    unique_users = []
-    seen_ids = set()
-    seen_names = set()
-
-    for user in user_info_raw:
-        accountId = user.get("accountId")
-        displayName = user.get("displayName")
-
-        if accountId and displayName:
-            if accountId not in seen_ids and displayName not in seen_names:
-                unique_users.append(user)
-                seen_ids.add(accountId)
-                seen_names.add(displayName)
-
-    with open(f"{company}_dashboard/{company}_users.json", "w") as f:
-        json.dump(unique_users, f, indent=4)
-    print(f"Extracted user info saved to dashboard/{company}_users.json")
+    print("\n")
 
 
-    def find_self_links(obj):
-        self_links = []
-        if isinstance(obj, dict):
-            for key, value in obj.items():
-                if key == "self" and isinstance(value, str):
-                    self_links.append(value)
-                else:
-                    self_links.extend(find_self_links(value))
-        elif isinstance(obj, list):
-            for item in obj:
-                self_links.extend(find_self_links(item))
-        return self_links
+async def main():
+    print(CLEAR_SCREEN)
+    print(BANNER)
+    company = input("Enter the Atlassian company name (subdomain): ").strip()
 
-    self_urls = find_self_links(data)
+    done_flag_filters = [False]
+    done_flag_dashboard = [False]
 
-    os.makedirs(f"{company}_dashboard/dashboard", exist_ok=True)
-    for link in self_urls:
-        match = re.search(r"/(\d+)$", link)
-        if match:
-            id_number = match.group(1)
-            try:
-                res = requests.get(link)
-                if res.status_code == 200:
-                    with open(f"{company}_dashboard/dashboard/{id_number}.json", "w") as f:
-                        json.dump(res.json(), f, indent=4)
-                    print(f"[✓] Saved: {company}_dashboard/dashboard/{GREEN}{id_number}.json{RESET}")
-                else:
-                    print(f"Failed to fetch {link} (Status {res.status_code})")
-            except Exception as e:
-                print(f"❌ Error fetching {link}: {e}")
-        # else:
-        #     print(f"⏭️ Skipped link (no numeric ID): {link}")
+    spinner_task_filters = asyncio.create_task(spinner("Filters", done_flag_filters))
+    spinner_task_dashboard = asyncio.create_task(spinner("Dashboard", done_flag_dashboard))
 
+    filters_task = asyncio.create_task(filters(company))
+    dashboard_task = asyncio.create_task(dashboard(company))
 
-def print_filters_statistics(company):
-    filters_dir = f"{company}_filters"
-    filter_names_dir = os.path.join(filters_dir, "filter_names")
-    usernames_file = os.path.join(filters_dir, "usernames", "filter_usernames.json")
+    await filters_task
+    done_flag_filters[0] = True
 
-    filter_count = 0
-    username_count = 0
+    await dashboard_task
+    done_flag_dashboard[0] = True
 
-    if os.path.exists(filter_names_dir):
-        filter_count = len([f for f in os.listdir(filter_names_dir) if f.endswith('.json')])
-    else:
-        print(f"Directory {filter_names_dir} not found.")
+    await spinner_task_filters
+    await spinner_task_dashboard
 
-    if os.path.exists(usernames_file):
-        try:
-            with open(usernames_file, 'r') as f:
-                usernames_data = json.load(f)
-                username_count = len(usernames_data) 
-        except Exception as e:
-            print(f"Error reading usernames file: {e}")
-    else:
-        print(f"Usernames file {usernames_file} not found.")
-
-    print(f"\n{GREEN}Statistics:{RESET}")
-    print(f"Filters Found: {filter_count}")
-    print(f"Usernames Extracted: {username_count}")
-
-def print_dashboard_statistics(company):
-    dashboard_dir = f"{company}_dashboard/dashboard/"
-    dashboard_users_file = f"{company}_dashboard/{company}_users.json"
-
-    dashboard_count = 0
-    username_count = 0
-
-    if os.path.exists(dashboard_dir):
-        dashboard_count = len([f for f in os.listdir(dashboard_dir) if f.endswith('.json') and f != f"{company}.json"])
-    else:
-        print(f"Directory {dashboard_dir} not found.")
-
-    if os.path.exists(dashboard_users_file):
-        try:
-            with open(dashboard_users_file, 'r') as f:
-                usernames_data = json.load(f)
-                username_count = len(usernames_data)
-        except Exception as e:
-            print(f"Error reading users file: {e}")
-    else:
-        print(f"Dashboard users file {dashboard_users_file} not found.")
-
-    print(f"\n{GREEN}Dashboard Statistics:{RESET}")
-    print(f"Dashboard Files Found: {dashboard_count}")
-    print(f"Usernames Extracted: {username_count}")
+    pretty_print_users(collected_users)
 
 
 if __name__ == "__main__":
-    print(CLEAR_SCREEN, end="")
-    print(BANNER)
-
-    company_name = input("Enter company name: ").strip()
-
-    print("\nWhat do you want to test?")
-    print("1. Filters")
-    print("2. Dashboard")
-    print("3. Both")
-
-    choice = input("Enter choice (1/2/3): ").strip()
-
-    async def main():
-        if choice not in ("1", "2", "3"):
-            print(f"\n{GREEN}Invalid choice. Please enter 1, 2, or 3.{RESET}")
-            return
-
-        tasks = []
-        flags = []
-
-        if choice == "1":
-            done_flag = [False]
-            flags.append(done_flag)
-            tasks.append(asyncio.create_task(filters(company_name)))
-            spinner_task = asyncio.create_task(spinner("Filters", done_flag))
-            await asyncio.gather(tasks[0])
-            done_flag[0] = True
-            await spinner_task
-            print_filters_statistics(company_name)
-
-        elif choice == "2":
-            done_flag = [False]
-            flags.append(done_flag)
-            tasks.append(asyncio.create_task(dashboard(company_name)))
-            spinner_task = asyncio.create_task(spinner("Dashboard", done_flag))
-            await asyncio.gather(tasks[0])
-            done_flag[0] = True
-            await spinner_task
-            print_dashboard_statistics(company_name)
-
-        elif choice == "3":
-            done_flag1 = [False]
-            done_flag2 = [False]
-            flags.extend([done_flag1, done_flag2])
-            task_filters = asyncio.create_task(filters(company_name))
-            task_dashboard = asyncio.create_task(dashboard(company_name))
-            spinner_filters = asyncio.create_task(spinner("Filters", done_flag1))
-            spinner_dashboard = asyncio.create_task(spinner("Dashboard", done_flag2))
-
-            await asyncio.gather(task_filters, task_dashboard)
-
-            done_flag1[0] = True
-            done_flag2[0] = True
-
-            await asyncio.gather(spinner_filters, spinner_dashboard)
-            print_filters_statistics(company_name)
-            print_dashboard_statistics(company_name)
-
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nExiting...")
